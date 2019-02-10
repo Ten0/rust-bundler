@@ -20,23 +20,30 @@ pub fn bundle<P: AsRef<Path>>(package_path: P) -> String {
         .expect("failed to obtain cargo metadata");
     let targets = &metadata.packages[0].targets;
     let bins: Vec<_> = targets.iter().filter(|t| target_is(t, "bin")).collect();
-    assert!(bins.len() != 0, "no binary target found");
-    assert!(bins.len() == 1, "multiple binary targets not supported");
-    let bin = bins[0];
     let libs: Vec<_> = targets.iter().filter(|t| target_is(t, "lib")).collect();
+    assert!(bins.len() <= 1, "multiple binary targets not supported");
     assert!(libs.len() <= 1, "multiple library targets not supported");
-    let lib = libs.get(0).unwrap_or(&bin);
+
+    let (bin, lib) = match (bins.is_empty(), libs.is_empty()) {
+        (true, true) => panic!("no binary or library targets are found"),
+        (false, true) => (bins[0], bins[0]),
+        (true, false) => (libs[0], libs[0]),
+        (false, false) => (bins[0], libs[0]),
+    };
+
     let base_path = Path::new(&lib.src_path)
         .parent()
         .expect("lib.src_path has no parent");
     let crate_name = &lib.name;
-    eprintln!("expanding binary {}", bin.src_path);
-    let code = read_file(&Path::new(&bin.src_path)).expect("failed to read binary target source");
-    let mut file = syn::parse_file(&code).expect("failed to parse binary target source");
+
+    eprintln!("expanding target {}", bin.src_path);
+    let code = read_file(&Path::new(&bin.src_path)).expect("failed to read target source");
+    let mut file = syn::parse_file(&code).expect("failed to parse target source");
     Expander {
         base_path,
         crate_name,
-    }.visit_file_mut(&mut file);
+    }
+    .visit_file_mut(&mut file);
     let code = file.into_tokens().to_string();
     prettify(code)
 }
@@ -95,18 +102,20 @@ impl<'a> Expander<'a> {
         let (base_path, code) = vec![
             (self.base_path, format!("{}.rs", name)),
             (&other_base_path, String::from("mod.rs")),
-        ].into_iter()
-            .flat_map(|(base_path, file_name)| {
-                read_file(&base_path.join(file_name)).map(|code| (base_path, code))
-            })
-            .next()
-            .expect("mod not found");
+        ]
+        .into_iter()
+        .flat_map(|(base_path, file_name)| {
+            read_file(&base_path.join(file_name)).map(|code| (base_path, code))
+        })
+        .next()
+        .expect("mod not found");
         eprintln!("expanding mod {} in {}", name, base_path.to_str().unwrap());
         let mut file = syn::parse_file(&code).expect("failed to parse file");
         Expander {
             base_path,
             crate_name: self.crate_name,
-        }.visit_file_mut(&mut file);
+        }
+        .visit_file_mut(&mut file);
         item.content = Some((Default::default(), file.items));
     }
 
