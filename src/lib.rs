@@ -44,7 +44,15 @@ pub fn bundle<P: AsRef<Path>>(package_path: P) -> String {
         crate_name,
     }
     .visit_file_mut(&mut file);
-    let code = file.into_tokens().to_string();
+    let code = if !bins.is_empty() {
+        file.into_tokens().to_string()
+    } else {
+        format!(
+            "pub mod {} {{ {} }}",
+            crate_name,
+            file.into_tokens().to_string()
+        )
+    };
     prettify(code)
 }
 
