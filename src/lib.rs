@@ -27,11 +27,11 @@ pub fn bundle<P: AsRef<Path>>(package_path: P) -> String {
     assert!(bins.len() <= 1, "multiple binary targets not supported");
     assert!(libs.len() <= 1, "multiple library targets not supported");
 
-    let (bin, lib) = match (bins.is_empty(), libs.is_empty()) {
-        (true, true) => panic!("no binary or library targets are found"),
-        (false, true) => (bins[0], bins[0]),
-        (true, false) => (libs[0], libs[0]),
-        (false, false) => (bins[0], libs[0]),
+    let (bin, lib) = match (bins.first(), libs.first()) {
+        (None, None) => panic!("no binary or library targets are found"),
+        (Some(bin), None) => (bin, bin),
+        (None, Some(lib)) => (lib, lib),
+        (Some(bin), Some(lib)) => (bin, lib),
     };
 
     let base_path = Path::new(&lib.src_path)
@@ -203,5 +203,5 @@ fn prettify(code: String) -> String {
     let result =
         rustfmt::format_input(rustfmt::Input::Text(code), &config, out).expect("rustfmt failed");
     let code = &result.1.first().expect("rustfmt returned no code").1;
-    format!("{}", code)
+    code.to_string()
 }
