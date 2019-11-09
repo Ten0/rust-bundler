@@ -16,7 +16,10 @@ use syn::visit_mut::VisitMut;
 /// Creates a single-source-file version of a Cargo package.
 pub fn bundle<P: AsRef<Path>>(package_path: P) -> String {
     let manifest_path = package_path.as_ref().join("Cargo.toml");
-    let metadata = cargo_metadata::metadata_deps(Some(&manifest_path), false)
+    let metadata = cargo_metadata::MetadataCommand::new()
+        .manifest_path(&manifest_path)
+        .no_deps()
+        .exec()
         .expect("failed to obtain cargo metadata");
     let targets = &metadata.packages[0].targets;
     let bins: Vec<_> = targets.iter().filter(|t| target_is(t, "bin")).collect();
@@ -36,7 +39,7 @@ pub fn bundle<P: AsRef<Path>>(package_path: P) -> String {
         .expect("lib.src_path has no parent");
     let crate_name = &lib.name;
 
-    eprintln!("expanding target {}", bin.src_path);
+    eprintln!("expanding target {}", bin.src_path.to_string_lossy());
     let code = read_file(&Path::new(&bin.src_path)).expect("failed to read target source");
     let mut file = syn::parse_file(&code).expect("failed to parse target source");
     Expander {
@@ -45,9 +48,9 @@ pub fn bundle<P: AsRef<Path>>(package_path: P) -> String {
     }
     .visit_file_mut(&mut file);
     let code = if !bins.is_empty() {
-        file.into_tokens().to_string()
+        file.into_token_stream().to_string()
     } else {
-        format!("pub mod {} {{ {} }}", crate_name, file.into_tokens())
+        format!("pub mod {} {{ {} }}", crate_name, file.into_token_stream())
     };
     prettify(code)
 }
@@ -174,7 +177,7 @@ fn is_extern_crate(item: &syn::Item, crate_name: &str) -> bool {
 fn path_starts_with(path: &syn::Path, segment: &str) -> bool {
     path.segments
         .first()
-        .map_or(false, |el| el.value().ident == segment)
+        .map_or(false, |el| el.ident == segment)
 }
 
 fn is_use_path(item: &syn::Item, first_segment: &str) -> bool {

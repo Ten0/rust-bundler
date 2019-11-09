@@ -5,7 +5,6 @@ use assert_cli::Assert;
 #[test]
 fn usage() {
     Assert::main_binary()
-        .with_args(&[])
         .fails()
         .stderr()
         .contains("Usage: bundle")
