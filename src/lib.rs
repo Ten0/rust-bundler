@@ -47,11 +47,7 @@ pub fn bundle<P: AsRef<Path>>(package_path: P) -> String {
     let code = if !bins.is_empty() {
         file.into_tokens().to_string()
     } else {
-        format!(
-            "pub mod {} {{ {} }}",
-            crate_name,
-            file.into_tokens().to_string()
-        )
+        format!("pub mod {} {{ {} }}", crate_name, file.into_tokens())
     };
     prettify(code)
 }
@@ -72,7 +68,7 @@ impl<'a> Expander<'a> {
     }
 
     fn expand_extern_crate(&self, items: &mut Vec<syn::Item>) {
-        let mut new_items = vec![];
+        let mut new_items = Vec::with_capacity(items.len());
         for item in items.drain(..) {
             if is_extern_crate(&item, self.crate_name) {
                 eprintln!(
@@ -92,13 +88,7 @@ impl<'a> Expander<'a> {
     }
 
     fn expand_use_path(&self, items: &mut Vec<syn::Item>) {
-        let mut new_items = vec![];
-        for item in items.drain(..) {
-            if !is_use_path(&item, self.crate_name) {
-                new_items.push(item);
-            }
-        }
-        *items = new_items;
+        items.retain(|i| !is_use_path(i, self.crate_name));
     }
 
     fn expand_mods(&self, item: &mut syn::ItemMod) {
@@ -182,12 +172,9 @@ fn is_extern_crate(item: &syn::Item, crate_name: &str) -> bool {
 }
 
 fn path_starts_with(path: &syn::Path, segment: &str) -> bool {
-    if let Some(el) = path.segments.first() {
-        if el.value().ident == segment {
-            return true;
-        }
-    }
-    false
+    path.segments
+        .first()
+        .map_or(false, |el| el.value().ident == segment)
 }
 
 fn is_use_path(item: &syn::Item, first_segment: &str) -> bool {
