@@ -4,64 +4,93 @@ extern crate quote;
 extern crate rustfmt;
 extern crate syn;
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Sink};
 use std::mem;
 use std::path::Path;
 
+use cargo_metadata::{Metadata, MetadataCommand, Node, Package, PackageId, Target};
 use quote::ToTokens;
 use syn::punctuated::Punctuated;
 use syn::visit_mut::VisitMut;
 
 /// Creates a single-source-file version of a Cargo package.
-pub fn bundle<P: AsRef<Path>>(package_path: P) -> String {
+pub fn bundle<P: AsRef<Path>>(
+    package_path: P,
+    skip_extern_crate_expansion: &HashSet<String>,
+) -> String {
     let manifest_path = package_path.as_ref().join("Cargo.toml");
-    let metadata = cargo_metadata::MetadataCommand::new()
+    let metadata = MetadataCommand::new()
         .manifest_path(&manifest_path)
-        .no_deps()
         .exec()
         .expect("failed to obtain cargo metadata");
-    let targets = &metadata.packages[0].targets;
-    let bins: Vec<_> = targets.iter().filter(|t| target_is(t, "bin")).collect();
-    let libs: Vec<_> = targets.iter().filter(|t| target_is(t, "lib")).collect();
-    assert!(bins.len() <= 1, "multiple binary targets not supported");
-    assert!(libs.len() <= 1, "multiple library targets not supported");
+    let metadata_resolve = metadata.resolve.as_ref().unwrap();
+    let root_id = metadata_resolve.root.as_ref().unwrap();
 
-    let (bin, lib) = match (bins.first(), libs.first()) {
-        (None, None) => panic!("no binary or library targets are found"),
-        (Some(bin), None) => (bin, bin),
-        (None, Some(lib)) => (lib, lib),
-        (Some(bin), Some(lib)) => (bin, lib),
-    };
+    let root_package = metadata
+        .packages
+        .iter()
+        .find(|package| &package.id == root_id)
+        .expect("Could not find root package");
 
-    let base_path = Path::new(&lib.src_path)
+    let target = root_package
+        .targets
+        .iter()
+        .find(|t| target_is(t, "bin"))
+        .or_else(|| root_package.targets.iter().find(|t| target_is(t, "lib")))
+        .expect("Could not find target");
+
+    let resolve_node = metadata_resolve
+        .nodes
+        .iter()
+        .find(|node| &node.id == root_id)
+        .expect("Could not find node");
+
+    let base_path = Path::new(&target.src_path)
         .parent()
         .expect("lib.src_path has no parent");
-    let crate_name = &lib.name;
 
-    eprintln!("expanding target {}", bin.src_path.to_string_lossy());
-    let code = read_file(&Path::new(&bin.src_path)).expect("failed to read target source");
+    eprintln!("expanding target {}", target.src_path.to_string_lossy());
+    let code = read_file(&Path::new(&target.src_path)).expect("failed to read target source");
     let mut file = syn::parse_file(&code).expect("failed to parse target source");
     Expander {
-        base_path,
-        crate_name,
+        base_path: &base_path,
+        metadata: &metadata,
+        package: root_package,
+        target: target,
+        resolve_node,
+        skip_extern_crate_expansion,
+        depth: 0,
     }
     .visit_file_mut(&mut file);
-    let code = if !bins.is_empty() {
-        file.into_token_stream().to_string()
-    } else {
-        format!("pub mod {} {{ {} }}", crate_name, file.into_token_stream())
-    };
+    let code = file.into_token_stream().to_string();
     prettify(code)
 }
 
-fn target_is(target: &cargo_metadata::Target, target_kind: &str) -> bool {
+fn target_is(target: &Target, target_kind: &str) -> bool {
     target.kind.iter().any(|kind| kind == target_kind)
+}
+
+fn package_target<'a>(package: &'a Package, target_type: &str) -> &'a Target {
+    package
+        .targets
+        .iter()
+        .find(|t| target_is(t, target_type))
+        .expect(&format!(
+            "Could not find target of type {} in package {}",
+            target_type, package.name
+        ))
 }
 
 struct Expander<'a> {
     base_path: &'a Path,
-    crate_name: &'a str,
+    metadata: &'a Metadata,
+    package: &'a Package,
+    target: &'a Target,
+    resolve_node: &'a Node,
+    skip_extern_crate_expansion: &'a HashSet<String>,
+    depth: usize,
 }
 
 impl<'a> Expander<'a> {
@@ -73,25 +102,84 @@ impl<'a> Expander<'a> {
     fn expand_extern_crate(&self, items: &mut Vec<syn::Item>) {
         let mut new_items = Vec::with_capacity(items.len());
         for item in items.drain(..) {
-            if is_extern_crate(&item, self.crate_name) {
-                eprintln!(
-                    "expanding crate {} in {}",
-                    self.crate_name,
-                    self.base_path.to_str().unwrap()
-                );
-                let code =
-                    read_file(&self.base_path.join("lib.rs")).expect("failed to read lib.rs");
-                let lib = syn::parse_file(&code).expect("failed to parse lib.rs");
-                new_items.extend(lib.items);
-            } else {
-                new_items.push(item);
+            match is_extern_crate(&item) {
+                Some(extern_crate_ident)
+                    if !self
+                        .skip_extern_crate_expansion
+                        .contains(&extern_crate_ident.to_string()) =>
+                {
+                    let extern_crate_name = extern_crate_ident.to_string();
+                    eprintln!(
+                        "expanding crate {} in {} at depth {}",
+                        &extern_crate_name,
+                        self.base_path.to_str().unwrap(),
+                        self.depth,
+                    );
+                    let root_id = self.root_id();
+                    let is_root_lib_expand =
+                        self.is_root() && self.root_lib_name() == &extern_crate_name;
+                    let crate_id = if is_root_lib_expand {
+                        root_id
+                    } else {
+                        &self
+                            .resolve_node
+                            .deps
+                            .iter()
+                            .find(|dep| dep.name == extern_crate_name)
+                            .expect(&format!(
+                                "Could not find dep {} in crate {}",
+                                extern_crate_name, self.package.name
+                            ))
+                            .pkg
+                    };
+                    let package = &self.package_by_id(crate_id);
+                    let target = package_target(package, "lib");
+                    let code = read_file(&target.src_path).expect("failed to read at lib src path");
+                    let mut lib = syn::parse_file(&code).expect("failed to parse at lib src path");
+                    Expander {
+                        base_path: &target.src_path.parent().unwrap(),
+                        metadata: self.metadata,
+                        package,
+                        target,
+                        resolve_node: self
+                            .metadata
+                            .resolve
+                            .as_ref()
+                            .unwrap()
+                            .nodes
+                            .iter()
+                            .find(|n| &n.id == crate_id)
+                            .expect("Could not find resolve_node"),
+                        skip_extern_crate_expansion: self.skip_extern_crate_expansion,
+                        depth: self.depth + 1,
+                    }
+                    .visit_file_mut(&mut lib);
+                    if is_root_lib_expand {
+                        new_items.extend(lib.items);
+                    } else {
+                        new_items.push(syn::Item::Mod(syn::ItemMod {
+                            attrs: Vec::new(),
+                            vis: syn::Visibility::Public(syn::VisPublic {
+                                pub_token: Default::default(),
+                            }),
+                            mod_token: syn::token::Mod::default(),
+                            ident: extern_crate_ident.clone(),
+                            content: Some((Default::default(), lib.items)),
+                            semi: None,
+                        }))
+                    }
+                }
+                _ => new_items.push(item),
             }
         }
         *items = new_items;
     }
 
     fn expand_use_path(&self, items: &mut Vec<syn::Item>) {
-        items.retain(|i| !is_use_path(i, self.crate_name));
+        if self.is_root() {
+            let root_name = self.root_lib_name();
+            items.retain(|i| !is_use_path(i, root_name));
+        }
     }
 
     fn expand_mods(&self, item: &mut syn::ItemMod) {
@@ -110,24 +198,59 @@ impl<'a> Expander<'a> {
         })
         .next()
         .expect("mod not found");
-        eprintln!("expanding mod {} in {}", name, base_path.to_str().unwrap());
+        eprintln!(
+            "expanding mod {} in {} at depth {}",
+            name,
+            base_path.to_str().unwrap(),
+            self.depth
+        );
         let mut file = syn::parse_file(&code).expect("failed to parse file");
         Expander {
             base_path,
-            crate_name: self.crate_name,
+            metadata: self.metadata,
+            package: self.package,
+            target: self.target,
+            resolve_node: self.resolve_node,
+            skip_extern_crate_expansion: self.skip_extern_crate_expansion,
+            depth: self.depth,
         }
         .visit_file_mut(&mut file);
         item.content = Some((Default::default(), file.items));
     }
 
     fn expand_crate_path(&mut self, path: &mut syn::Path) {
-        if path_starts_with(path, self.crate_name) {
+        if self.is_root() && path_starts_with(path, self.root_lib_name()) {
             let new_segments = mem::replace(&mut path.segments, Punctuated::new())
                 .into_pairs()
                 .skip(1)
                 .collect();
             path.segments = new_segments;
         }
+    }
+
+    fn root_lib_name(&self) -> &str {
+        let root_package = self.package_by_id(self.root_id());
+        let lib_package = root_package.targets.iter().find(|t| target_is(t, "lib"));
+        lib_package.map(|p| &p.name).unwrap_or(&root_package.name)
+    }
+    fn package_by_id(&self, package_id: &PackageId) -> &Package {
+        self.metadata
+            .packages
+            .iter()
+            .find(|package| &package.id == package_id)
+            .expect("Could not find package by id")
+    }
+    fn root_id(&self) -> &PackageId {
+        self.metadata
+            .resolve
+            .as_ref()
+            .unwrap()
+            .root
+            .as_ref()
+            .unwrap()
+    }
+    fn is_root(&self) -> bool {
+        self.root_id() == &self.package.id
     }
 }
 
@@ -165,13 +288,11 @@ impl<'a> VisitMut for Expander<'a> {
     }
 }
 
-fn is_extern_crate(item: &syn::Item, crate_name: &str) -> bool {
-    if let syn::Item::ExternCrate(ref item) = *item {
-        if item.ident == crate_name {
-            return true;
-        }
+fn is_extern_crate(item: &syn::Item) -> Option<&syn::Ident> {
+    match item {
+        syn::Item::ExternCrate(item) => Some(&item.ident),
+        _ => None,
     }
-    false
 }
 
 fn path_starts_with(path: &syn::Path, segment: &str) -> bool {
@@ -198,10 +319,19 @@ fn read_file(path: &Path) -> Option<String> {
 }
 
 fn prettify(code: String) -> String {
-    let config = Default::default();
-    let out: Option<&mut Sink> = None;
-    let result =
-        rustfmt::format_input(rustfmt::Input::Text(code), &config, out).expect("rustfmt failed");
-    let code = &result.1.first().expect("rustfmt returned no code").1;
-    code.to_string()
+    match rustfmt::format_input::<Sink>(
+        rustfmt::Input::Text(code.clone()),
+        &Default::default(),
+        None,
+    )
+    .expect("rustfmt failed")
+    .1
+    .first()
+    {
+        Some((_path, code)) => code.to_string(),
+        None => {
+            eprintln!("rustfmt failed");
+            code
+        }
+    }
 }

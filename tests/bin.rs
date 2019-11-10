@@ -14,7 +14,7 @@ fn usage() {
 #[test]
 fn bundle_self() {
     Assert::main_binary()
-        .with_args(&["."])
+        .with_args(&[".", "cargo_metadata", "quote", "rustfmt", "syn"])
         .stdout()
         .contains("pub fn bundle<")
         .stdout()

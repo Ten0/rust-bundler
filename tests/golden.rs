@@ -1,8 +1,8 @@
 extern crate bundler;
 extern crate goldenfile;
 
-use std::io::Write;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use goldenfile::Mint;
@@ -17,10 +17,10 @@ fn golden() {
         let input_path = entry.expect("no entry").path();
         let input_name = input_path.file_name().expect("no file name");
         let output_name = Path::new(input_name).with_extension("rs");
-        let mut output_file = mint.new_goldenfile(output_name).expect(
-            "new_goldenfile failed",
-        );
-        let output = bundler::bundle(&input_path);
+        let mut output_file = mint
+            .new_goldenfile(output_name)
+            .expect("new_goldenfile failed");
+        let output = bundler::bundle(&input_path, &Default::default());
         write!(output_file, "{}", output).expect("write! failed");
     }
 }

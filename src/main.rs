@@ -1,13 +1,14 @@
 extern crate bundler;
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let path_to_project = args.next().unwrap_or_else(|| {
-        eprintln!("Usage: bundle path/to/project");
-        std::process::exit(1);
-    });
-    let write_code_to = args.next();
-    let code = bundler::bundle(&path_to_project);
+    let mut args = std::env::args().skip(1).peekable();
+    let write_code_to = if args.peek().unwrap_or_else(|| usage()) == "-o" {
+        Some(args.nth(1).unwrap_or_else(|| usage()))
+    } else {
+        None
+    };
+    let path_to_project = args.next().unwrap_or_else(|| usage());
+    let code = bundler::bundle(&path_to_project, &args.collect());
     if let Some(write_code_to) = write_code_to {
         let write_to_full_path = format!(
             "{}/{}",
@@ -19,4 +20,9 @@ fn main() {
     } else {
         println!("{}", code);
     }
+}
+
+fn usage() -> ! {
+    eprintln!("Usage: bundle [-o output] path/to/project excluded_dep1 excluded_dep2");
+    std::process::exit(1);
 }
